@@ -972,44 +972,50 @@ func calculateFare(pickupLatitude, pickupLongitude, destLatitude, destLongitude 
 }
 
 func calculateDiscountedFare(ctx context.Context, tx *sqlx.Tx, userID string, ride *Ride, pickupLatitude, pickupLongitude, destLatitude, destLongitude int) (int, error) {
-	var coupon Coupon
-	discount := 0
-	if ride != nil {
-		destLatitude = ride.DestinationLatitude
-		destLongitude = ride.DestinationLongitude
-		pickupLatitude = ride.PickupLatitude
-		pickupLongitude = ride.PickupLongitude
+	var discount int
 
-		// すでにクーポンが紐づいているならそれの割引額を参照
-		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE used_by = ?", ride.ID); err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return 0, err
-			}
-		} else {
-			discount = coupon.Discount
-		}
-	} else {
-		// 初回利用クーポンを最優先で使う
-		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND code = 'CP_NEW2024' AND used_by IS NULL", userID); err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return 0, err
-			}
-
-			// 無いなら他のクーポンを付与された順番に使う
-			if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1", userID); err != nil {
-				if !errors.Is(err, sql.ErrNoRows) {
-					return 0, err
-				}
-			} else {
-				discount = coupon.Discount
-			}
-		} else {
-			discount = coupon.Discount
-		}
+	// クーポンの割引額を取得
+	discount, err := getDiscount(ctx, tx, userID, ride)
+	if err != nil {
+		return 0, err
 	}
 
+	// 距離に基づく料金計算
 	meteredFare := farePerDistance * calculateDistance(pickupLatitude, pickupLongitude, destLatitude, destLongitude)
 	discountedMeteredFare := max(meteredFare-discount, 0)
 
+	// 初乗り料金を加算して最終料金を返却
 	return initialFare + discountedMeteredFare, nil
+}
+
+// クーポンの割引額を取得する関数
+func getDiscount(ctx context.Context, tx *sqlx.Tx, userID string, ride *Ride) (int, error) {
+	var coupon Coupon
+
+	if ride != nil {
+		// 既存のライドに紐づくクーポンを取得
+		err := tx.GetContext(ctx, &coupon, "SELECT discount FROM coupons WHERE used_by = ?", ride.ID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, nil
+			}
+			return 0, err
+		}
+		return coupon.Discount, nil
+	}
+
+	// 初回利用クーポンまたは未使用クーポンを取得
+	err := tx.GetContext(ctx, &coupon, `
+		SELECT discount FROM coupons
+		WHERE user_id = ? AND used_by IS NULL
+		ORDER BY (code = 'CP_NEW2024') DESC, created_at ASC LIMIT 1
+	`, userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	return coupon.Discount, nil
 }
