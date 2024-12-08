@@ -125,6 +125,13 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
+	txl, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer txl.Rollback()
+
 	// 未マッチのライドを取得
 	ride := &Ride{}
 	err = tx.QueryRowContext(ctx, `
@@ -146,7 +153,7 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	// 徐々に距離を広げて椅子を検索
 	maxDistance := 150.0 // 最大距離 (km)
 	stepDistance := 25.0 // 段階距離 (km)
-	chair, err := graduallyExpandSearch(ctx, tx, ride, maxDistance, stepDistance)
+	chair, err := graduallyExpandSearch(ctx, txl, ride, maxDistance, stepDistance)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

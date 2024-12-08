@@ -112,8 +112,15 @@ func ownerGetSales(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
+	txl, err := dbl.Beginx()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer txl.Rollback()
+
 	chairs := []Chair{}
-	if err := tx.SelectContext(ctx, &chairs, "SELECT * FROM chairs WHERE owner_id = ?", owner.ID); err != nil {
+	if err := txl.SelectContext(ctx, &chairs, "SELECT * FROM chairs WHERE owner_id = ?", owner.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -241,7 +248,7 @@ func ownerGetChairs(w http.ResponseWriter, r *http.Request) {
 		FROM chairs c
 		WHERE c.owner_id = ?
 	`
-	if err := db.SelectContext(ctx, &chairs, query, owner.ID); err != nil {
+	if err := dbl.SelectContext(ctx, &chairs, query, owner.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -253,7 +260,13 @@ func ownerGetChairs(w http.ResponseWriter, r *http.Request) {
 		distance, found := getChairDistance(chair.ID)
 		if !found {
 			// キャッシュが見つからない場合はデータベースから計算して更新
-			totalDistance, updatedAt := calculateDistanceFromDatabase(chair.ID)
+			totalDistance, updatedAt, err := calculateDistanceFromDatabase(ctx, chair.ID)
+
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+
 			updateChairDistanceCache(chair.ID, totalDistance, updatedAt)
 			distance = ChairDistance{
 				TotalDistance:          totalDistance,
@@ -318,7 +331,7 @@ func haversineDistanceInt(lat1, lon1, lat2, lon2 int) int {
 }
 
 // データベースから移動距離を計算する関数
-func calculateDistanceFromDatabaseInt(ctx context.Context, db *sql.DB, chairID string) (int, time.Time, error) {
+func calculateDistanceFromDatabase(ctx context.Context, chairID string) (int, time.Time, error) {
 	query := `
 		SELECT latitude, longitude, created_at
 		FROM chair_locations
@@ -327,7 +340,7 @@ func calculateDistanceFromDatabaseInt(ctx context.Context, db *sql.DB, chairID s
 	`
 
 	// クエリ実行
-	rows, err := db.QueryContext(ctx, query, chairID)
+	rows, err := dbl.QueryContext(ctx, query, chairID)
 	if err != nil {
 		return 0, time.Time{}, err
 	}
