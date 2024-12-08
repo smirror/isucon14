@@ -136,3 +136,15 @@ CREATE TABLE coupons
   PRIMARY KEY (user_id, code)
 )
   COMMENT 'クーポンテーブル';
+
+
+-- rides テーブルの chair_id にインデックス
+CREATE INDEX idx_rides_chair_id ON rides (chair_id);
+
+-- chair_locations テーブルの chair_id にインデックス
+CREATE INDEX idx_chair_locations_chair_id ON chair_locations (chair_id);
+
+-- ride_statuses テーブルの ride_id にインデックス
+CREATE INDEX idx_ride_statuses_ride_id ON ride_statuses (ride_id);
+
+CREATE INDEX idx_lat_lng ON chair_locations (latitude, longitude);
