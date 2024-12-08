@@ -320,7 +320,7 @@ func getLatestRideStatus(ctx context.Context, tx *sqlx.Tx, rideID string) (strin
 	// キャッシュに保存
 	rideStatusCache.Store(rideID, CacheItem{
 		Value:     status,
-		ExpiresAt: time.Now().Add(30 * time.Second), // 30秒の有効期限
+		ExpiresAt: time.Now().Add(3 * time.Second), // 3秒の有効期限
 	})
 	return status, nil
 }
