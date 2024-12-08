@@ -41,8 +41,8 @@ CREATE TABLE chair_locations
 (
   id         VARCHAR(26) NOT NULL,
   chair_id   VARCHAR(26) NOT NULL COMMENT '椅子ID',
-  latitude   INTEGER     NOT NULL COMMENT '経度',
-  longitude  INTEGER     NOT NULL COMMENT '緯度',
+  latitude DECIMAL(9,6) NOT NULL COMMENT '経度',
+  longitude DECIMAL(9,6) NOT NULL COMMENT '緯度',
   created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '登録日時',
   PRIMARY KEY (id)
 )
@@ -83,10 +83,10 @@ CREATE TABLE rides
   id                    VARCHAR(26) NOT NULL COMMENT 'ライドID',
   user_id               VARCHAR(26) NOT NULL COMMENT 'ユーザーID',
   chair_id              VARCHAR(26) NULL     COMMENT '割り当てられた椅子ID',
-  pickup_latitude       INTEGER     NOT NULL COMMENT '配車位置(経度)',
-  pickup_longitude      INTEGER     NOT NULL COMMENT '配車位置(緯度)',
-  destination_latitude  INTEGER     NOT NULL COMMENT '目的地(経度)',
-  destination_longitude INTEGER     NOT NULL COMMENT '目的地(緯度)',
+  pickup_latitude       DECIMAL(9,6)     NOT NULL COMMENT '配車位置(経度)',
+  pickup_longitude      DECIMAL(9,6)     NOT NULL COMMENT '配車位置(緯度)',
+  destination_latitude  DECIMAL(9,6)     NOT NULL COMMENT '目的地(経度)',
+  destination_longitude DECIMAL(9,6)     NOT NULL COMMENT '目的地(緯度)',
   evaluation            INTEGER     NULL     COMMENT '評価',
   created_at            DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '要求日時',
   updated_at            DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT '状態更新日時',
@@ -143,8 +143,12 @@ CREATE INDEX idx_rides_chair_id ON rides (chair_id);
 
 -- chair_locations テーブルの chair_id にインデックス
 CREATE INDEX idx_chair_locations_chair_id ON chair_locations (chair_id);
+CREATE INDEX idx_lat_lng ON chair_locations (latitude, longitude);
 
 -- ride_statuses テーブルの ride_id にインデックス
 CREATE INDEX idx_ride_statuses_ride_id ON ride_statuses (ride_id);
 
-CREATE INDEX idx_lat_lng ON chair_locations (latitude, longitude);
+
+CREATE INDEX idx_rides_user_id ON rides (user_id);
+CREATE INDEX idx_rides_pickup_location ON rides (pickup_latitude, pickup_longitude);
+CREATE INDEX idx_users_access_token ON users (access_token);
