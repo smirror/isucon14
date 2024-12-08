@@ -166,6 +166,16 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func handleError(w http.ResponseWriter, err error, defaultMessage string) {
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
+			RetryAfterMs: 30,
+		})
+		return
+	}
+	writeError(w, http.StatusInternalServerError, err)
+}
+
 type simpleUser struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -198,7 +208,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	yetSentRideStatus := RideStatus{}
 	status := ""
 
-	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
+	if err := tx.GetContext(ctx, ride, `SELECT id, updated_at FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusOK, &chairGetNotificationResponse{
 				RetryAfterMs: 30,
@@ -209,8 +219,9 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := tx.GetContext(ctx, &yetSentRideStatus, `SELECT * FROM ride_statuses WHERE ride_id = ? AND chair_sent_at IS NULL ORDER BY created_at ASC LIMIT 1`, ride.ID); err != nil {
+	if err := tx.GetContext(ctx, &yetSentRideStatus, `SELECT status, created_at FROM ride_statuses WHERE ride_id = ? AND chair_sent_at IS NULL ORDER BY created_at ASC LIMIT 1`, ride.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			// 最新のステータス取得
 			status, err = getLatestRideStatus(ctx, tx, ride.ID)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err)
