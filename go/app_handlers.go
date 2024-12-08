@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -85,7 +86,7 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 
 		// ユーザーチェック
 		var inviter User
-		err = tx.GetContext(ctx, &inviter, "SELECT * FROM users WHERE invitation_code = ?", *req.InvitationCode)
+		err = tx.GetContext(ctx, &inviter, "SELECT id FROM users WHERE invitation_code = ?", *req.InvitationCode)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
@@ -106,10 +107,11 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 招待した人にもRewardを付与
+		rewardCouponCode := generateCouponCode("RWD", *req.InvitationCode)
 		_, err = tx.ExecContext(
 			ctx,
-			"INSERT INTO coupons (user_id, code, discount) VALUES (?, CONCAT(?, '_', FLOOR(UNIX_TIMESTAMP(NOW(3))*1000)), ?)",
-			inviter.ID, "RWD_"+*req.InvitationCode, 1000,
+			"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
+			inviter.ID, rewardCouponCode, 1000,
 		)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -132,6 +134,13 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 		ID:             userID,
 		InvitationCode: invitationCode,
 	})
+}
+
+func generateCouponCode(prefix, invitationCode string) string {
+	// 現在時刻をミリ秒単位で取得
+	timestamp := time.Now().UnixMilli()
+	// クーポンコードの生成
+	return fmt.Sprintf("%s_%s_%d", prefix, invitationCode, timestamp)
 }
 
 type appPostPaymentMethodsRequest struct {
