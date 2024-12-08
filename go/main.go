@@ -18,6 +18,7 @@ import (
 )
 
 var db *sqlx.DB
+var dbl *sqlx.DB
 
 func main() {
 	mux := setup()
@@ -64,6 +65,23 @@ func setup() http.Handler {
 		panic(err)
 	}
 	db = _db
+
+	// DB 位置情報用DB
+	host_l := "192.168.0.13"
+
+	dblConfig := mysql.NewConfig()
+	dblConfig.User = user
+	dblConfig.Passwd = password
+	dblConfig.Addr = net.JoinHostPort(host_l, port)
+	dblConfig.Net = "tcp"
+	dblConfig.DBName = dbname
+	dblConfig.ParseTime = true
+
+	_dbl, err := sqlx.Connect("mysql", dblConfig.FormatDSN())
+	if err != nil {
+		panic(err)
+	}
+	dbl = _dbl
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.Logger)

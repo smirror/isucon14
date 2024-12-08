@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/oklog/ulid/v2"
+	"honnef.co/go/tools/lintcmd/cache"
 )
 
 const (
@@ -109,8 +112,15 @@ func ownerGetSales(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
+	txl, err := dbl.Beginx()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer txl.Rollback()
+
 	chairs := []Chair{}
-	if err := tx.SelectContext(ctx, &chairs, "SELECT * FROM chairs WHERE owner_id = ?", owner.ID); err != nil {
+	if err := txl.SelectContext(ctx, &chairs, "SELECT * FROM chairs WHERE owner_id = ?", owner.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -190,52 +200,188 @@ type ownerGetChairResponseChair struct {
 	TotalDistanceUpdatedAt *int64 `json:"total_distance_updated_at,omitempty"`
 }
 
+// グローバルキャッシュ
+var chairDistanceCache *cache.Cache
+
+// キャッシュ構造体
+type ChairDistance struct {
+	TotalDistance          float64   // 合計距離
+	TotalDistanceUpdatedAt time.Time // 最終更新日時
+}
+
+func init() {
+	// 0.05秒間の有効期限、0.5秒間アクセスがない場合に自動削除
+	chairDistanceCache = cache.New(50*time.Millisecond, 500*time.Millisecond)
+}
+
+func updateChairDistanceCache(chairID string, totalDistance float64, updatedAt time.Time) {
+	// キャッシュにデータを保存
+	chairDistanceCache.Set(chairID, ChairDistance{
+		TotalDistance:          totalDistance,
+		TotalDistanceUpdatedAt: updatedAt,
+	}, cache.DefaultExpiration)
+}
+
+func getChairDistance(chairID string) (ChairDistance, bool) {
+	// キャッシュから取得
+	if data, found := chairDistanceCache.Get(chairID); found {
+		return data.(ChairDistance), true
+	}
+	return ChairDistance{}, false
+}
+
 func ownerGetChairs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	owner := ctx.Value("owner").(*Owner)
 
+	// 改良されたクエリ（キャッシュ未ヒット時に利用）
 	chairs := []chairWithDetail{}
-	if err := db.SelectContext(ctx, &chairs, `SELECT id,
-       owner_id,
-       name,
-       access_token,
-       model,
-       is_active,
-       created_at,
-       updated_at,
-       IFNULL(total_distance, 0) AS total_distance,
-       total_distance_updated_at
-FROM chairs
-       LEFT JOIN (SELECT chair_id,
-                          SUM(IFNULL(distance, 0)) AS total_distance,
-                          MAX(created_at)          AS total_distance_updated_at
-                   FROM (SELECT chair_id,
-                                created_at,
-                                ABS(latitude - LAG(latitude) OVER (PARTITION BY chair_id ORDER BY created_at)) +
-                                ABS(longitude - LAG(longitude) OVER (PARTITION BY chair_id ORDER BY created_at)) AS distance
-                         FROM chair_locations) tmp
-                   GROUP BY chair_id) distance_table ON distance_table.chair_id = chairs.id
-WHERE owner_id = ?
-`, owner.ID); err != nil {
+	query := `
+		SELECT c.id,
+		       c.owner_id,
+		       c.name,
+		       c.access_token,
+		       c.model,
+		       c.is_active,
+		       c.created_at,
+		       c.updated_at
+		FROM chairs c
+		WHERE c.owner_id = ?
+	`
+	if err := dbl.SelectContext(ctx, &chairs, query, owner.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
+	// キャッシュ利用のレスポンス構築
 	res := ownerGetChairResponse{}
 	for _, chair := range chairs {
+		// キャッシュから移動距離を取得
+		distance, found := getChairDistance(chair.ID)
+		if !found {
+			// キャッシュが見つからない場合はデータベースから計算して更新
+			totalDistance, updatedAt, err := calculateDistanceFromDatabase(ctx, chair.ID)
+
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+
+			updateChairDistanceCache(chair.ID, totalDistance, updatedAt)
+			distance = ChairDistance{
+				TotalDistance:          totalDistance,
+				TotalDistanceUpdatedAt: updatedAt,
+			}
+		}
+
+		// レスポンスに追加
 		c := ownerGetChairResponseChair{
 			ID:            chair.ID,
 			Name:          chair.Name,
 			Model:         chair.Model,
 			Active:        chair.IsActive,
 			RegisteredAt:  chair.CreatedAt.UnixMilli(),
-			TotalDistance: chair.TotalDistance,
+			TotalDistance: distance.TotalDistance,
 		}
-		if chair.TotalDistanceUpdatedAt.Valid {
-			t := chair.TotalDistanceUpdatedAt.Time.UnixMilli()
+		if !distance.TotalDistanceUpdatedAt.IsZero() {
+			t := distance.TotalDistanceUpdatedAt.UnixMilli()
 			c.TotalDistanceUpdatedAt = &t
 		}
 		res.Chairs = append(res.Chairs, c)
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// 地球の半径（km単位）
+const EarthRadiusKm = 6371.0
+
+// 地球の半径（メートル単位、整数で管理）
+const EarthRadiusMeters = 6371000
+
+// 精度調整のためのスケール（小数点以下を整数に変換）
+const ScaleFactor = 1000
+
+// 2点間の距離をハバースイン公式で計算（整数）
+func haversineDistanceInt(lat1, lon1, lat2, lon2 int) int {
+	// 度をラジアンに変換（整数で計算）
+	rad := func(deg int) int {
+		return deg * int(math.Pi*ScaleFactor/180) / ScaleFactor
+	}
+
+	lat1Rad := rad(lat1)
+	lon1Rad := rad(lon1)
+	lat2Rad := rad(lat2)
+	lon2Rad := rad(lon2)
+
+	// 緯度と経度の差（整数で計算）
+	deltaLat := lat2Rad - lat1Rad
+	deltaLon := lon2Rad - lon1Rad
+
+	// ハバースイン公式（整数演算）
+	a := (int(math.Sin(float64(deltaLat)/2*ScaleFactor/ScaleFactor)) *
+		int(math.Sin(float64(deltaLat)/2*ScaleFactor/ScaleFactor))) +
+		(int(math.Cos(float64(lat1Rad*ScaleFactor/ScaleFactor))) *
+			int(math.Cos(float64(lat2Rad*ScaleFactor/ScaleFactor))) *
+			int(math.Sin(float64(deltaLon)/2*ScaleFactor/ScaleFactor)) *
+			int(math.Sin(float64(deltaLon)/2*ScaleFactor/ScaleFactor)))
+
+	c := 2 * int(math.Atan2(math.Sqrt(float64(a)), math.Sqrt(float64(1-a))))
+
+	return EarthRadiusMeters * c / ScaleFactor
+}
+
+// データベースから移動距離を計算する関数
+func calculateDistanceFromDatabase(ctx context.Context, chairID string) (int, time.Time, error) {
+	query := `
+		SELECT latitude, longitude, created_at
+		FROM chair_locations
+		WHERE chair_id = ?
+		ORDER BY created_at;
+	`
+
+	// クエリ実行
+	rows, err := dbl.QueryContext(ctx, query, chairID)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	defer rows.Close()
+
+	// 距離計算用変数
+	var totalDistance int
+	var prevLat, prevLon int
+	var prevTime time.Time
+	var updatedAt time.Time
+
+	// データを1行ずつ処理
+	isFirstRow := true
+	for rows.Next() {
+		var lat, lon float64
+		var createdAt time.Time
+
+		if err := rows.Scan(&lat, &lon, &createdAt); err != nil {
+			return 0, time.Time{}, err
+		}
+
+		// 緯度・経度をスケールに基づき整数に変換
+		intLat := int(lat * ScaleFactor)
+		intLon := int(lon * ScaleFactor)
+
+		// 初回の処理をスキップ
+		if isFirstRow {
+			prevLat, prevLon, prevTime = intLat, intLon, createdAt
+			isFirstRow = false
+			continue
+		}
+
+		// 距離を計算（整数で計算）
+		totalDistance += haversineDistanceInt(prevLat, prevLon, intLat, intLon)
+		prevLat, prevLon, prevTime = intLat, intLon, createdAt
+		updatedAt = createdAt
+	}
+
+	if err := rows.Err(); err != nil {
+		return 0, time.Time{}, err
+	}
+
+	return totalDistance, updatedAt, nil
 }
