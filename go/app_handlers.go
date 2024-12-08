@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -85,7 +87,7 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 
 		// ユーザーチェック
 		var inviter User
-		err = tx.GetContext(ctx, &inviter, "SELECT * FROM users WHERE invitation_code = ?", *req.InvitationCode)
+		err = tx.GetContext(ctx, &inviter, "SELECT id FROM users WHERE invitation_code = ?", *req.InvitationCode)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				writeError(w, http.StatusBadRequest, errors.New("この招待コードは使用できません。"))
@@ -106,10 +108,11 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 招待した人にもRewardを付与
+		rewardCouponCode := generateCouponCode("RWD", *req.InvitationCode)
 		_, err = tx.ExecContext(
 			ctx,
-			"INSERT INTO coupons (user_id, code, discount) VALUES (?, CONCAT(?, '_', FLOOR(UNIX_TIMESTAMP(NOW(3))*1000)), ?)",
-			inviter.ID, "RWD_"+*req.InvitationCode, 1000,
+			"INSERT INTO coupons (user_id, code, discount) VALUES (?, ?, ?)",
+			inviter.ID, rewardCouponCode, 1000,
 		)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -132,6 +135,13 @@ func appPostUsers(w http.ResponseWriter, r *http.Request) {
 		ID:             userID,
 		InvitationCode: invitationCode,
 	})
+}
+
+func generateCouponCode(prefix, invitationCode string) string {
+	// 現在時刻をミリ秒単位で取得
+	timestamp := time.Now().UnixMilli()
+	// クーポンコードの生成
+	return fmt.Sprintf("%s_%s_%d", prefix, invitationCode, timestamp)
 }
 
 type appPostPaymentMethodsRequest struct {
@@ -283,11 +293,35 @@ type executableGet interface {
 	GetContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
 }
 
-func getLatestRideStatus(ctx context.Context, tx executableGet, rideID string) (string, error) {
-	status := ""
-	if err := tx.GetContext(ctx, &status, `SELECT status FROM ride_statuses WHERE ride_id = ? ORDER BY created_at DESC LIMIT 1`, rideID); err != nil {
+type CacheItem struct {
+	Value     string
+	ExpiresAt time.Time
+}
+
+var rideStatusCache sync.Map
+
+func getLatestRideStatus(ctx context.Context, tx *sqlx.Tx, rideID string) (string, error) {
+	if item, ok := rideStatusCache.Load(rideID); ok {
+		cached := item.(CacheItem)
+		if time.Now().Before(cached.ExpiresAt) {
+			return cached.Value, nil
+		}
+		// 有効期限切れの場合キャッシュを削除
+		rideStatusCache.Delete(rideID)
+	}
+
+	// データベースから取得
+	var status string
+	err := tx.GetContext(ctx, &status, `SELECT status FROM ride_statuses WHERE ride_id = ? ORDER BY created_at DESC LIMIT 1`, rideID)
+	if err != nil {
 		return "", err
 	}
+
+	// キャッシュに保存
+	rideStatusCache.Store(rideID, CacheItem{
+		Value:     status,
+		ExpiresAt: time.Now().Add(30 * time.Second), // 30秒の有効期限
+	})
 	return status, nil
 }
 
@@ -486,15 +520,24 @@ func appPostRidesEstimatedFare(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// マンハッタン距離を求める
+// チェビシェフ距離を求める
 func calculateDistance(aLatitude, aLongitude, bLatitude, bLongitude int) int {
-	return abs(aLatitude-bLatitude) + abs(aLongitude-bLongitude)
+	latDiff := abs(aLatitude - bLatitude)
+	lonDiff := abs(aLongitude - bLongitude)
+	return max(latDiff, lonDiff)
 }
 func abs(a int) int {
 	if a < 0 {
 		return -a
 	}
 	return a
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 type appPostRideEvaluationRequest struct {
@@ -963,44 +1006,50 @@ func calculateFare(pickupLatitude, pickupLongitude, destLatitude, destLongitude 
 }
 
 func calculateDiscountedFare(ctx context.Context, tx *sqlx.Tx, userID string, ride *Ride, pickupLatitude, pickupLongitude, destLatitude, destLongitude int) (int, error) {
-	var coupon Coupon
-	discount := 0
-	if ride != nil {
-		destLatitude = ride.DestinationLatitude
-		destLongitude = ride.DestinationLongitude
-		pickupLatitude = ride.PickupLatitude
-		pickupLongitude = ride.PickupLongitude
+	var discount int
 
-		// すでにクーポンが紐づいているならそれの割引額を参照
-		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE used_by = ?", ride.ID); err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return 0, err
-			}
-		} else {
-			discount = coupon.Discount
-		}
-	} else {
-		// 初回利用クーポンを最優先で使う
-		if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND code = 'CP_NEW2024' AND used_by IS NULL", userID); err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return 0, err
-			}
-
-			// 無いなら他のクーポンを付与された順番に使う
-			if err := tx.GetContext(ctx, &coupon, "SELECT * FROM coupons WHERE user_id = ? AND used_by IS NULL ORDER BY created_at LIMIT 1", userID); err != nil {
-				if !errors.Is(err, sql.ErrNoRows) {
-					return 0, err
-				}
-			} else {
-				discount = coupon.Discount
-			}
-		} else {
-			discount = coupon.Discount
-		}
+	// クーポンの割引額を取得
+	discount, err := getDiscount(ctx, tx, userID, ride)
+	if err != nil {
+		return 0, err
 	}
 
+	// 距離に基づく料金計算
 	meteredFare := farePerDistance * calculateDistance(pickupLatitude, pickupLongitude, destLatitude, destLongitude)
 	discountedMeteredFare := max(meteredFare-discount, 0)
 
+	// 初乗り料金を加算して最終料金を返却
 	return initialFare + discountedMeteredFare, nil
+}
+
+// クーポンの割引額を取得する関数
+func getDiscount(ctx context.Context, tx *sqlx.Tx, userID string, ride *Ride) (int, error) {
+	var coupon Coupon
+
+	if ride != nil {
+		// 既存のライドに紐づくクーポンを取得
+		err := tx.GetContext(ctx, &coupon, "SELECT discount FROM coupons WHERE used_by = ?", ride.ID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, nil
+			}
+			return 0, err
+		}
+		return coupon.Discount, nil
+	}
+
+	// 初回利用クーポンまたは未使用クーポンを取得
+	err := tx.GetContext(ctx, &coupon, `
+		SELECT discount FROM coupons
+		WHERE user_id = ? AND used_by IS NULL
+		ORDER BY (code = 'CP_NEW2024') DESC, created_at ASC LIMIT 1
+	`, userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	return coupon.Discount, nil
 }
