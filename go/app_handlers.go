@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -292,11 +293,35 @@ type executableGet interface {
 	GetContext(ctx context.Context, dest interface{}, query string, args ...interface{}) error
 }
 
-func getLatestRideStatus(ctx context.Context, tx executableGet, rideID string) (string, error) {
-	status := ""
-	if err := tx.GetContext(ctx, &status, `SELECT status FROM ride_statuses WHERE ride_id = ? ORDER BY created_at DESC LIMIT 1`, rideID); err != nil {
+type CacheItem struct {
+	Value     string
+	ExpiresAt time.Time
+}
+
+var rideStatusCache sync.Map
+
+func getLatestRideStatus(ctx context.Context, tx *sqlx.Tx, rideID string) (string, error) {
+	if item, ok := rideStatusCache.Load(rideID); ok {
+		cached := item.(CacheItem)
+		if time.Now().Before(cached.ExpiresAt) {
+			return cached.Value, nil
+		}
+		// 有効期限切れの場合キャッシュを削除
+		rideStatusCache.Delete(rideID)
+	}
+
+	// データベースから取得
+	var status string
+	err := tx.GetContext(ctx, &status, `SELECT status FROM ride_statuses WHERE ride_id = ? ORDER BY created_at DESC LIMIT 1`, rideID)
+	if err != nil {
 		return "", err
 	}
+
+	// キャッシュに保存
+	rideStatusCache.Store(rideID, CacheItem{
+		Value:     status,
+		ExpiresAt: time.Now().Add(30 * time.Second), // 30秒の有効期限
+	})
 	return status, nil
 }
 
