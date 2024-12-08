@@ -28,7 +28,7 @@ func main() {
 func setup() http.Handler {
 	host := os.Getenv("ISUCON_DB_HOST")
 	if host == "" {
-		host = "127.0.0.1"
+		host = "192.168.0.12"
 	}
 	port := os.Getenv("ISUCON_DB_PORT")
 	if port == "" {
