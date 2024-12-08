@@ -3,13 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"time"
-
-	"golang.org/x/exp/rand"
 )
 
 var erroredUpstream = errors.New("errored upstream")

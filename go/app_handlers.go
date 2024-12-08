@@ -496,14 +496,29 @@ func appPostRidesEstimatedFare(w http.ResponseWriter, r *http.Request) {
 }
 
 // マンハッタン距離を求める
+//
+//	func calculateDistance(aLatitude, aLongitude, bLatitude, bLongitude int) int {
+//		return abs(aLatitude-bLatitude) + abs(aLongitude-bLongitude)
+//	}
+//
+// チェビシェフ距離を求める
 func calculateDistance(aLatitude, aLongitude, bLatitude, bLongitude int) int {
-	return abs(aLatitude-bLatitude) + abs(aLongitude-bLongitude)
+	latDiff := abs(aLatitude - bLatitude)
+	lonDiff := abs(aLongitude - bLongitude)
+	return max(latDiff, lonDiff)
 }
 func abs(a int) int {
 	if a < 0 {
 		return -a
 	}
 	return a
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 type appPostRideEvaluationRequest struct {
